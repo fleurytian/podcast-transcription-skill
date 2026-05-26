@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+transcripts/
+*_raw_segments.json
+*_diarized_segments.json
+*.m4a
+*.mp3
+*.wav
