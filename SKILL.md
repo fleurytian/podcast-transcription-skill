@@ -1,6 +1,6 @@
 ---
 name: podcast-transcription
-description: Use when turning podcast links or audio into transcripts, especially 小宇宙/Xiaoyuzhou episodes, faster-whisper, 逐字稿, 声纹区分, 说话人区分, 连续段落版, podcast transcript zip packages, or transcript folder cleanup.
+description: Use when turning podcast, YouTube, or local audio links into transcripts, especially 小宇宙/Xiaoyuzhou episodes, YouTube videos, faster-whisper, 逐字稿, 声纹区分, 说话人区分, 连续段落版, transcript zip packages, or transcript folder cleanup.
 ---
 
 # Podcast Transcription
@@ -14,6 +14,7 @@ Produce user-facing podcast transcripts as continuous paragraph Markdown with vo
 - Workspace default: the current project folder.
 - Transcript output folder: `transcripts/`.
 - Preferred Python: a virtual environment that has `faster-whisper`, `speechbrain`, `torch`, `torchaudio`, and `numpy` installed.
+- Optional download helper for YouTube: `yt-dlp`.
 - Preferred ASR model: `mobiuslabsgmbh/faster-whisper-large-v3-turbo`.
 - Preferred speaker embedding model: `speechbrain/spkrec-ecapa-voxceleb`.
 - SpeechBrain cache: use the default Hugging Face/SpeechBrain cache, or pass a local cache path to the helper script.
@@ -42,6 +43,18 @@ Search locally for existing models before installing or downloading anything new
    - Merge adjacent same-speaker segments before formatting.
    - Keep the transcript text verbatim enough to be useful; do not summarize inside the transcript.
 6. When multiple episodes are requested, create one zip containing only final continuous Markdown files unless the user asks for raw files too.
+
+## YouTube Workflow
+
+YouTube links can use the same transcription and diarization path:
+
+1. Download the audio track with `yt-dlp` using the best available audio-only format.
+2. Save the file under `transcripts/` or another working folder.
+3. Run local faster-whisper on that audio file.
+4. Use SpeechBrain ECAPA embeddings for speaker separation:
+   - Prefer explicit voiceprint anchors when speaker names matter.
+   - If anchors are not available, use automatic speaker clustering and label speakers generically.
+5. Format exactly like podcast transcripts: continuous paragraphs, and only a new timestamp when the speaker changes.
 
 ## Output Contract
 
@@ -77,10 +90,12 @@ The same speaker must not appear in two adjacent sections. If a formatter create
 
 ## Useful Script
 
-Use `scripts/podcast_transcribe.py` when starting from a local audio file and known metadata. It can:
+Use `scripts/podcast_transcribe.py` when starting from a local audio file, a YouTube URL, and known metadata. It can:
 
 - run faster-whisper
+- download YouTube audio with `yt-dlp`
 - assign speakers from voiceprint anchor ranges
+- automatically cluster speakers when anchor ranges are not available
 - smooth short speaker-label islands
 - write raw JSON plus final continuous Markdown
 
@@ -98,7 +113,19 @@ python \
   --speaker-ranges "嘉宾=180:240,600:660"
 ```
 
-Use `--single-speaker 名字` for solo episodes or when diarization is not needed.
+YouTube example:
+
+```bash
+python \
+  scripts/podcast_transcribe.py \
+  --youtube-url "https://www.youtube.com/watch?v=..." \
+  --slug example_youtube_episode \
+  --title "Video title" \
+  --podcast "YouTube" \
+  --auto-speakers 2
+```
+
+Use explicit `--speaker-ranges` for the best voiceprint-level result, `--auto-speakers 2` when names are unknown, and `--single-speaker 名字` for solo episodes.
 
 ## Validation
 
