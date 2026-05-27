@@ -2,7 +2,7 @@
 
 Codex skill for turning podcasts, YouTube videos, and local audio files into continuous paragraph transcripts with speaker separation.
 
-一个用于播客、YouTube 视频和本地音频转写的 Codex skill：先提取音源，再用本地 `faster-whisper` 转写，并通过 SpeechBrain ECAPA 声纹嵌入区分说话人，最后输出适合阅读的连续段落版 Markdown。
+一个用于小宇宙播客（Xiaoyuzhou / 小宇宙）、YouTube 视频和本地音频转写的 Codex skill：先提取音源，再用本地 `faster-whisper` 转写，并通过 SpeechBrain ECAPA 声纹嵌入区分说话人，最后输出适合阅读的连续段落版 Markdown。
 
 The output format is designed for reading, not subtitle editing: adjacent speech by the same person is merged into one paragraph block, and timestamps appear only when the speaker changes.
 
@@ -24,6 +24,20 @@ The output format is designed for reading, not subtitle editing: adjacent speech
 - 将 raw JSON、音频等工作文件与最终可读稿分开管理。
 - Supports YouTube by downloading audio with `yt-dlp` first, then running the same transcription and diarization flow.
 - 支持 YouTube 链接：先用 `yt-dlp` 下载音轨，再走同一套转写与声纹区分流程。
+- Supports Xiaoyuzhou podcast transcription through RSS/enclosure audio extraction when available.
+- 支持小宇宙播客转写：可通过 RSS/enclosure 音频地址提取音源，再生成带说话人区分的全文逐字稿。
+
+## Supported Sources / 支持来源
+
+- Xiaoyuzhou / 小宇宙 podcasts
+- YouTube videos
+- Local audio files such as `.m4a`, `.mp3`, `.wav`, `.webm`, and `.opus`
+- Podcast RSS enclosure audio
+
+- 小宇宙播客链接
+- YouTube 视频链接
+- 本地音频文件，如 `.m4a`, `.mp3`, `.wav`, `.webm`, `.opus`
+- 播客 RSS 中的 enclosure 音频地址
 
 ## Install As A Codex Skill / 安装为 Codex Skill
 
@@ -162,3 +176,7 @@ Speaker diarization is probabilistic. For best results:
 The formatter validates that the same speaker does not appear in adjacent transcript sections. If the same person keeps talking, the text stays in one continuous block instead of being split by timeline labels.
 
 格式化器会检查同一说话人不会出现在相邻标题里。如果同一个人持续说话，文本会保持在一个连续段落组里，而不会被时间标签切碎。
+
+## Keywords / 关键词
+
+Xiaoyuzhou transcript, 小宇宙转写, 小宇宙逐字稿, podcast transcription, Chinese podcast transcript, YouTube transcription, speaker diarization, voiceprint speaker separation, faster-whisper, SpeechBrain, 连续段落版逐字稿, 声纹区分说话人。
