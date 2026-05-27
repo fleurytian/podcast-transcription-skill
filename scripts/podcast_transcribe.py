@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -73,6 +74,33 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def download_youtube_audio(url: str, out_dir: Path, slug: str) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_template = out_dir / f"{slug}.%(ext)s"
+    before = {p.resolve() for p in out_dir.glob(f"{slug}.*")}
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "-f",
+        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+        "-o",
+        str(output_template),
+        url,
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError as exc:
+        raise SystemExit("yt-dlp is required for --youtube-url. Install it with: pip install yt-dlp") from exc
+
+    candidates = [p for p in out_dir.glob(f"{slug}.*") if p.resolve() not in before]
+    if not candidates:
+        candidates = list(out_dir.glob(f"{slug}.*"))
+    candidates = [p for p in candidates if p.suffix.lower() in {".m4a", ".webm", ".mp3", ".opus", ".wav"}]
+    if not candidates:
+        raise SystemExit(f"yt-dlp finished but no audio file was found for slug {slug!r}")
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def transcribe(audio: Path, model_name: str, language: str) -> list[Segment]:
     from faster_whisper import WhisperModel
 
@@ -93,13 +121,9 @@ def transcribe(audio: Path, model_name: str, language: str) -> list[Segment]:
 
 def load_audio_16k(audio: Path):
     import torch
-    import torchaudio
+    from faster_whisper.audio import decode_audio
 
-    waveform, sr = torchaudio.load(str(audio))
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-    if sr != 16000:
-        waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+    waveform = torch.from_numpy(decode_audio(str(audio), sampling_rate=16000)).float().unsqueeze(0)
     return waveform, 16000, torch
 
 
@@ -180,6 +204,87 @@ def diarize(
         scores = {speaker: cosine(emb, anchor) for speaker, anchor in anchors.items()}
         speaker, score = max(scores.items(), key=lambda item: item[1])
         assigned.append(Segment(seg.start, seg.end, seg.text, speaker=speaker, score=score))
+    return smooth_short_islands(assigned)
+
+
+def l2_normalize(matrix):
+    import numpy as np
+
+    matrix = np.nan_to_num(matrix.astype("float32"), nan=0.0, posinf=0.0, neginf=0.0)
+    denom = np.linalg.norm(matrix, axis=1, keepdims=True)
+    denom[denom == 0] = 1
+    return matrix / denom
+
+
+def auto_diarize(
+    audio: Path,
+    segments: list[Segment],
+    n_speakers: int,
+    source: str,
+    savedir: str,
+    min_clip: float,
+    max_clip: float,
+) -> list[Segment]:
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from speechbrain.inference.speaker import EncoderClassifier
+
+    if n_speakers <= 1 or len(segments) < 2:
+        return [Segment(seg.start, seg.end, seg.text, speaker="Speaker 1", score=seg.score) for seg in segments]
+
+    waveform, sr, torch = load_audio_16k(audio)
+    classifier = EncoderClassifier.from_hparams(source=source, savedir=str(Path(savedir).expanduser()))
+
+    embeddings = []
+    emb_indices = []
+    for idx, seg in enumerate(segments):
+        duration = max(0.1, seg.end - seg.start)
+        if duration > max_clip:
+            center = (seg.start + seg.end) / 2
+            start = center - max_clip / 2
+            end = center + max_clip / 2
+        else:
+            start, end = seg.start, seg.end
+        if end - start < min_clip:
+            pad = (min_clip - (end - start)) / 2
+            start -= pad
+            end += pad
+        lo = max(0, int(start * sr))
+        hi = min(waveform.shape[1], int(end * sr))
+        if hi <= lo:
+            continue
+        clip = waveform[:, lo:hi]
+        with torch.no_grad():
+            emb = classifier.encode_batch(clip).squeeze().detach().cpu().numpy()
+        embeddings.append(emb)
+        emb_indices.append(idx)
+
+    if len(embeddings) < n_speakers:
+        return [Segment(seg.start, seg.end, seg.text, speaker="Speaker 1", score=seg.score) for seg in segments]
+
+    labels = KMeans(n_clusters=n_speakers, n_init=25, random_state=17).fit_predict(l2_normalize(np.vstack(embeddings)))
+    full_labels: list[int | None] = [None] * len(segments)
+    for idx, label in zip(emb_indices, labels):
+        full_labels[idx] = int(label)
+
+    last_label = int(labels[0])
+    for idx, label in enumerate(full_labels):
+        if label is None:
+            full_labels[idx] = last_label
+        else:
+            last_label = label
+
+    first_seen: list[int] = []
+    for label in full_labels:
+        label = int(label)
+        if label not in first_seen:
+            first_seen.append(label)
+    names = {label: f"Speaker {i + 1}" for i, label in enumerate(first_seen)}
+
+    assigned = [
+        Segment(seg.start, seg.end, seg.text, speaker=names[int(label)], score=seg.score)
+        for seg, label in zip(segments, full_labels)
+    ]
     return smooth_short_islands(assigned)
 
 
@@ -265,7 +370,9 @@ def dump_json(path: Path, segments: list[Segment]) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audio", required=True, type=Path)
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--audio", type=Path)
+    source_group.add_argument("--youtube-url")
     parser.add_argument("--out-dir", default="transcripts", type=Path)
     parser.add_argument("--slug", required=True)
     parser.add_argument("--title", required=True)
@@ -274,6 +381,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--language", default="zh")
     parser.add_argument("--speaker-ranges", action="append", default=[], help="NAME=start:end,start:end")
+    parser.add_argument("--auto-speakers", default=0, type=int, help="Automatically cluster this many speakers when no anchors are provided")
     parser.add_argument("--single-speaker", default="")
     parser.add_argument("--speechbrain-source", default=DEFAULT_SPEECHBRAIN)
     parser.add_argument("--speechbrain-savedir", default=DEFAULT_SPEECHBRAIN_CACHE)
@@ -285,12 +393,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    audio = args.audio
+    if args.youtube_url:
+        audio = download_youtube_audio(args.youtube_url, args.out_dir, args.slug)
 
-    segments = transcribe(args.audio, args.model, args.language)
+    source = args.source or args.youtube_url or str(audio)
+    segments = transcribe(audio, args.model, args.language)
     raw_json = args.out_dir / f"{args.slug}_raw_segments.json"
     raw_md = args.out_dir / f"{args.slug}_raw_逐字稿.md"
     dump_json(raw_json, segments)
-    write_raw_markdown(raw_md, args.title, args.source, segments)
+    write_raw_markdown(raw_md, args.title, source, segments)
 
     ranges = parse_speaker_ranges(args.speaker_ranges)
     diarization_note = "single speaker"
@@ -299,7 +411,7 @@ def main() -> None:
             seg.speaker = args.single_speaker
     elif ranges:
         segments = diarize(
-            args.audio,
+            audio,
             segments,
             ranges,
             args.speechbrain_source,
@@ -308,6 +420,17 @@ def main() -> None:
             args.max_clip,
         )
         diarization_note = "SpeechBrain ECAPA voice embeddings from user-provided anchor ranges; labels may contain diarization uncertainty."
+    elif args.auto_speakers > 1:
+        segments = auto_diarize(
+            audio,
+            segments,
+            args.auto_speakers,
+            args.speechbrain_source,
+            args.speechbrain_savedir,
+            args.min_clip,
+            args.max_clip,
+        )
+        diarization_note = f"SpeechBrain ECAPA voice embeddings with automatic {args.auto_speakers}-speaker clustering; labels are generic and may contain diarization uncertainty."
     else:
         for seg in segments:
             seg.speaker = "Speaker 1"
@@ -318,7 +441,7 @@ def main() -> None:
 
     turns = merge_turns(segments, fallback_speaker=args.single_speaker or "Speaker 1")
     final_md = args.out_dir / f"{args.slug}_声纹区分_连续段落版.md"
-    write_continuous_markdown(final_md, args.title, args.podcast, args.source, turns, args.model, diarization_note)
+    write_continuous_markdown(final_md, args.title, args.podcast, source, turns, args.model, diarization_note)
     check_no_adjacent_same_speaker(final_md)
     print(final_md)
 
